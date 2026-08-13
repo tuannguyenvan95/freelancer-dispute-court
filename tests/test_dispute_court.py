@@ -16,13 +16,15 @@ def test_happy_path(gl_client):
     contract.connect(freelancer_addr).submit_evidence(args=["1", "1", "https://github.com/demo/pr/1"]).transact()
     contract.connect(freelancer_addr).submit_evidence(args=["1", "1", "https://demo.app"]).transact()
     
-    milestone = contract.get_milestone(args=["1", "1"]).call()
-    assert milestone.state == "OPEN"
+    milestone_json = contract.get_milestone(args=["1", "1"]).call()
+    milestone = json.loads(milestone_json)
+    assert milestone["state"] == "OPEN"
     
     contract.connect(client_addr).open_dispute(args=["1", "1"]).transact()
     
-    milestone = contract.get_milestone(args=["1", "1"]).call()
-    assert milestone.state == "DISPUTED"
+    milestone_json = contract.get_milestone(args=["1", "1"]).call()
+    milestone = json.loads(milestone_json)
+    assert milestone["state"] == "DISPUTED"
     
     gl_client.provider.make_request(
         method="sim_installMocks",
@@ -43,9 +45,10 @@ def test_happy_path(gl_client):
     
     contract.connect(client_addr).adjudicate(args=["1", "1"]).transact()
     
-    milestone = contract.get_milestone(args=["1", "1"]).call()
-    assert milestone.state == "CLOSED"
-    assert milestone.verdict == "RELEASE"
+    milestone_json = contract.get_milestone(args=["1", "1"]).call()
+    milestone = json.loads(milestone_json)
+    assert milestone["state"] == "CLOSED"
+    assert milestone["verdict"] == "RELEASE"
 
 def test_edge_cases(gl_client):
     treasury_addr = "0x9999999999999999999999999999999999999999"

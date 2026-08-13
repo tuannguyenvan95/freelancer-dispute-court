@@ -269,14 +269,34 @@ class Contract(gl.Contract):
         self.milestones[m_key] = milestone
 
     @gl.public.view
-    def get_job(self, job_id: str) -> Job:
+    def get_job(self, job_id: str) -> str:
+        import json
         if job_id not in self.jobs:
             raise UserError("Job not found")
-        return self.jobs[job_id]
+        job = self.jobs[job_id]
+        return json.dumps({
+            "id": str(job.id),
+            "client": str(job.client),
+            "freelancer": str(job.freelancer),
+            "milestones_count": str(job.milestones_count)
+        })
 
     @gl.public.view
-    def get_milestone(self, job_id: str, milestone_id: str) -> Milestone:
+    def get_milestone(self, job_id: str, milestone_id: str) -> str:
+        import json
         m_key = str(job_id) + "_" + str(milestone_id)
         if m_key not in self.milestones:
             raise UserError("Milestone not found")
-        return self.milestones[m_key]
+        m = self.milestones[m_key]
+        return json.dumps({
+            "id": str(m.id),
+            "job_id": str(m.job_id),
+            "description": m.description,
+            "amount": str(m.amount),
+            "evidence_url_1": m.evidence_url_1,
+            "evidence_url_2": m.evidence_url_2,
+            "evidence_count": str(m.evidence_count),
+            "state": m.state,
+            "verdict": m.verdict,
+            "reason": m.reason
+        })
