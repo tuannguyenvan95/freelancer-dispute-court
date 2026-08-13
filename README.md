@@ -64,7 +64,7 @@ assert milestone.state == "CLOSED"
 ## Deployment
 
 This intelligent contract has been deployed on GenLayer.
-- **CONTRACT_ADDRESS:** `0x0ADC5cd110ECB89594387d75f120eF18561024bF`
+- **CONTRACT_ADDRESS:** `0x9D57c04be517DEd5ab290A004B8e7F246147e170`
 - **NETWORK:** `studionet`
 
 See [scripts/deploy.md](scripts/deploy.md) for step-by-step instructions on how to deploy this intelligent contract on GenLayer Studio.
