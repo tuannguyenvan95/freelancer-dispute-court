@@ -209,6 +209,9 @@ class Contract(gl.Contract):
             if mine["verdict"] != leader["verdict"]:
                 return False
 
+            if (mine.get("confidence", 0) >= 60) != (leader.get("confidence", 0) >= 60):
+                return False
+
             if leader["verdict"] == "PARTIAL":
                 if mine.get("percentage") != leader.get("percentage"):
                     return False
