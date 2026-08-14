@@ -151,11 +151,53 @@ class Contract(gl.Contract):
         if milestone.state == "CLOSED":
             raise UserError("Milestone is already closed")
 
-        # Capture data BEFORE entering nondet block (no storage access inside)
+        # Capture data BEFORE entering nondet block
         ms_description = milestone.description
         ev_url_1 = milestone.evidence_url_1
         ev_url_2 = milestone.evidence_url_2
         ev_count = int(milestone.evidence_count)
+
+        def _safe_parse(raw):
+            """Nhận cả dict lẫn string. Trả về dict sạch hoặc None."""
+            try:
+                if isinstance(raw, dict):
+                    data = raw
+                elif isinstance(raw, str):
+                    raw = raw.strip()
+                    if raw.startswith("```"):
+                        parts = raw.split("```")
+                        if len(parts) >= 2:
+                            raw = parts[1]
+                            if raw.startswith("json"):
+                                raw = raw[4:]
+                    data = json.loads(raw)
+                else:
+                    return None
+
+                verdict = data.get("verdict")
+                if verdict not in ("RELEASE", "REFUND", "PARTIAL"):
+                    return None
+
+                percentage = data.get("percentage", 0)
+                if not isinstance(percentage, (int, float)) or not (0 <= percentage <= 100):
+                    return None
+
+                confidence = data.get("confidence", 0)
+                if not isinstance(confidence, (int, float)) or not (0 <= confidence <= 100):
+                    return None
+
+                reason = data.get("reason", "")
+                if not isinstance(reason, str):
+                    return None
+
+                return {
+                    "verdict": str(verdict),
+                    "percentage": int(percentage),
+                    "confidence": int(confidence),
+                    "reason": reason[:2000]
+                }
+            except Exception:
+                return None
 
         def leader_fn():
             evidence_texts = []
@@ -189,49 +231,48 @@ class Contract(gl.Contract):
                 '"reason": "string explaining your reasoning"}'
             )
 
-            return gl.nondet.exec_prompt(prompt, response_format="json")
+            raw = gl.nondet.exec_prompt(prompt, response_format="json")
+            parsed = _safe_parse(raw)
+            if parsed is None:
+                # Trả về object đặc biệt để validator reject
+                return {
+                    "verdict": "INVALID",
+                    "percentage": 0,
+                    "confidence": 0,
+                    "reason": "parse_failed"
+                }
+            return parsed
 
         def validator_fn(leader_res) -> bool:
             if not isinstance(leader_res, gl.vm.Return):
                 return False
-            leader_raw = leader_res.calldata
-            mine_raw = leader_fn()
 
-            try:
-                leader = json.loads(leader_raw)
-                mine = json.loads(mine_raw)
-            except Exception:
+            leader = _safe_parse(leader_res.calldata)
+            if leader is None or leader.get("verdict") == "INVALID":
                 return False
 
-            if "verdict" not in leader or "verdict" not in mine:
+            mine = _safe_parse(leader_fn())
+            if mine is None or mine.get("verdict") == "INVALID":
                 return False
 
-            if mine["verdict"] != leader["verdict"]:
-                return False
-
-            if (mine.get("confidence", 0) >= 60) != (leader.get("confidence", 0) >= 60):
-                return False
-
-            if leader["verdict"] == "PARTIAL":
-                if mine.get("percentage") != leader.get("percentage"):
-                    return False
-
-            return True
+            # === BIND MỌI FIELD ẢNH HƯỞNG ĐẾN PAYOUT ===
+            # verdict + percentage + confidence đều được so khớp chặt
+            return (
+                mine["verdict"] == leader["verdict"]
+                and mine["percentage"] == leader["percentage"]
+                and mine["confidence"] == leader["confidence"]
+            )
 
         result_raw = gl.vm.run_nondet(leader_fn, validator_fn)
+        result = _safe_parse(result_raw)
 
-        try:
-            result = json.loads(result_raw)
-        except Exception:
-            raise UserError("AI returned invalid JSON")
+        if result is None or result.get("verdict") == "INVALID":
+            raise UserError("AI returned invalid or unparseable result")
 
-        verdict = result.get("verdict", "")
-        confidence = result.get("confidence", 0)
-        percentage = result.get("percentage", 0)
-        reason = result.get("reason", "No reason provided")
-
-        if verdict not in ["RELEASE", "REFUND", "PARTIAL"]:
-            raise UserError("Invalid verdict from AI: " + str(verdict))
+        verdict = result["verdict"]
+        confidence = result["confidence"]
+        percentage = result["percentage"]
+        reason = result["reason"]
 
         if confidence < 60:
             raise UserError("AI confidence too low to adjudicate autonomously")
@@ -249,8 +290,10 @@ class Contract(gl.Contract):
                 gl.get_contract_at(Address(self.treasury_address)).emit_transfer(value=fee)
             if payout > bigint(0):
                 gl.get_contract_at(freelancer_addr).emit_transfer(value=payout)
+
         elif verdict == "REFUND":
             gl.get_contract_at(client_addr).emit_transfer(value=ms_amount)
+
         elif verdict == "PARTIAL":
             freelancer_share = (ms_amount * bigint(percentage)) // bigint(100)
             client_share = ms_amount - freelancer_share
@@ -270,7 +313,6 @@ class Contract(gl.Contract):
 
     @gl.public.view
     def get_job(self, job_id: str) -> str:
-        import json
         if job_id not in self.jobs:
             raise UserError("Job not found")
         job = self.jobs[job_id]
@@ -283,7 +325,6 @@ class Contract(gl.Contract):
 
     @gl.public.view
     def get_milestone(self, job_id: str, milestone_id: str) -> str:
-        import json
         m_key = str(job_id) + "_" + str(milestone_id)
         if m_key not in self.milestones:
             raise UserError("Milestone not found")
