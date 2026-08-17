@@ -24,8 +24,8 @@ class Milestone:
 @dataclass
 class Job:
     id: bigint
-    client: Address
-    freelancer: Address
+    client: str
+    freelancer: str
     milestones_count: bigint
 
 
@@ -37,7 +37,18 @@ class Contract(gl.Contract):
 
     def __init__(self, treasury_addr: str):
         self.job_counter = bigint(0)
-        self.treasury_address = treasury_addr
+        self.treasury_address = treasury_addr.strip() if treasury_addr else ""
+
+    def _addr_str(self, addr: Address) -> str:
+        try:
+            return addr.as_hex
+        except Exception:
+            return str(addr)
+
+    def _get_treasury_addr(self) -> Address:
+        if not self.treasury_address:
+            raise UserError("Treasury address not set")
+        return Address(self.treasury_address)
 
     @gl.public.write
     def create_job(self, freelancer_addr: str) -> None:
@@ -46,9 +57,9 @@ class Contract(gl.Contract):
 
         self.jobs[str(job_id)] = Job(
             id=job_id,
-            client=gl.message.sender,
-            freelancer=Address(freelancer_addr),
-            milestones_count=bigint(0)
+            client=self._addr_str(gl.message.sender_address),
+            freelancer=freelancer_addr.strip(),
+            milestones_count=bigint(0),
         )
 
     @gl.public.view
@@ -65,7 +76,7 @@ class Contract(gl.Contract):
             raise UserError("Job not found")
 
         job = self.jobs[job_id]
-        if gl.message.sender != job.client:
+        if self._addr_str(gl.message.sender_address) != job.client:
             raise UserError("Only client can add milestones")
 
         job.milestones_count += bigint(1)
@@ -83,7 +94,7 @@ class Contract(gl.Contract):
             evidence_count=bigint(0),
             state="OPEN",
             verdict="",
-            reason=""
+            reason="",
         )
 
         self.jobs[job_id] = job
@@ -94,7 +105,7 @@ class Contract(gl.Contract):
             raise UserError("Job not found")
 
         job = self.jobs[job_id]
-        if gl.message.sender != job.freelancer:
+        if self._addr_str(gl.message.sender_address) != job.freelancer:
             raise UserError("Only the freelancer can submit evidence")
 
         m_key = str(job_id) + "_" + str(milestone_id)
@@ -121,7 +132,8 @@ class Contract(gl.Contract):
             raise UserError("Job not found")
 
         job = self.jobs[job_id]
-        if gl.message.sender != job.client and gl.message.sender != job.freelancer:
+        sender = self._addr_str(gl.message.sender_address)
+        if sender != job.client and sender != job.freelancer:
             raise UserError("Only client or freelancer can open dispute")
 
         m_key = str(job_id) + "_" + str(milestone_id)
@@ -148,53 +160,68 @@ class Contract(gl.Contract):
 
         if milestone.state != "DISPUTED":
             raise UserError("Milestone is not disputed")
-        if milestone.state == "CLOSED":
-            raise UserError("Milestone is already closed")
 
-        # Capture data BEFORE entering nondet block
         ms_description = milestone.description
         ev_url_1 = milestone.evidence_url_1
         ev_url_2 = milestone.evidence_url_2
         ev_count = int(milestone.evidence_count)
 
         def _safe_parse(raw):
-            """Nhận cả dict lẫn string. Trả về dict sạch hoặc None."""
             try:
                 if isinstance(raw, dict):
                     data = raw
+                elif hasattr(raw, "calldata") and isinstance(raw.calldata, dict):
+                    data = raw.calldata
+                elif hasattr(raw, "content"):
+                    return _safe_parse(raw.content)
                 elif isinstance(raw, str):
-                    raw = raw.strip()
-                    if raw.startswith("```"):
-                        parts = raw.split("```")
-                        if len(parts) >= 2:
-                            raw = parts[1]
-                            if raw.startswith("json"):
-                                raw = raw[4:]
-                    data = json.loads(raw)
+                    text = raw.strip()
+                    if text.startswith("```json"):
+                        text = text[7:]
+                    elif text.startswith("```"):
+                        text = text[3:]
+                    if text.endswith("```"):
+                        text = text[:-3]
+                    data = json.loads(text.strip())
                 else:
                     return None
 
-                verdict = data.get("verdict")
-                if verdict not in ("RELEASE", "REFUND", "PARTIAL"):
+                verdict = str(data.get("verdict", "")).strip().upper()
+                if verdict not in ("RELEASE", "REFUND", "PARTIAL", "ESCALATE"):
                     return None
 
                 percentage = data.get("percentage", 0)
-                if not isinstance(percentage, (int, float)) or not (0 <= percentage <= 100):
+                if isinstance(percentage, float):
+                    percentage = int(percentage)
+                if not isinstance(percentage, int) or not (0 <= percentage <= 100):
+                    return None
+
+                if verdict == "RELEASE":
+                    percentage = 100
+                elif verdict == "REFUND":
+                    percentage = 0
+                elif verdict == "PARTIAL" and not (1 <= percentage <= 99):
                     return None
 
                 confidence = data.get("confidence", 0)
-                if not isinstance(confidence, (int, float)) or not (0 <= confidence <= 100):
+                if isinstance(confidence, float):
+                    confidence = int(confidence)
+                if not isinstance(confidence, int) or not (0 <= confidence <= 100):
                     return None
 
-                reason = data.get("reason", "")
-                if not isinstance(reason, str):
-                    return None
+                reason = str(data.get("reason", ""))
+
+                # Bind confidence directly to verdict: Low confidence falls back to ESCALATE
+                if confidence < 60 and verdict != "ESCALATE":
+                    verdict = "ESCALATE"
+                    percentage = 0
+                    reason = f"[low_confidence: {confidence}%] " + reason
 
                 return {
-                    "verdict": str(verdict),
-                    "percentage": int(percentage),
-                    "confidence": int(confidence),
-                    "reason": reason[:2000]
+                    "verdict": verdict,
+                    "percentage": percentage,
+                    "confidence": confidence,
+                    "reason": reason[:1000],
                 }
             except Exception:
                 return None
@@ -204,95 +231,111 @@ class Contract(gl.Contract):
 
             if ev_count >= 1 and ev_url_1 != "":
                 try:
-                    text = gl.nondet.web.render(ev_url_1, mode="text")
-                    evidence_texts.append("Evidence from " + ev_url_1 + ":\n" + text)
+                    res = gl.nondet.web.render(ev_url_1, mode="text")
+                    text = res.content if hasattr(res, "content") else str(res)
+                    if not text or len(text.strip()) < 10:
+                        evidence_texts.append(f"Evidence 1 ({ev_url_1}): [EMPTY_OR_FETCH_FAILED]")
+                    else:
+                        evidence_texts.append(f"Evidence 1 ({ev_url_1}):\n{text[:3000]}")
                 except Exception as e:
-                    evidence_texts.append("Evidence from " + ev_url_1 + " could not be loaded: " + str(e))
+                    evidence_texts.append(f"Evidence 1 ({ev_url_1}) error: {str(e)}")
 
             if ev_count >= 2 and ev_url_2 != "":
                 try:
-                    text = gl.nondet.web.render(ev_url_2, mode="text")
-                    evidence_texts.append("Evidence from " + ev_url_2 + ":\n" + text)
+                    res = gl.nondet.web.render(ev_url_2, mode="text")
+                    text = res.content if hasattr(res, "content") else str(res)
+                    if not text or len(text.strip()) < 10:
+                        evidence_texts.append(f"Evidence 2 ({ev_url_2}): [EMPTY_OR_FETCH_FAILED]")
+                    else:
+                        evidence_texts.append(f"Evidence 2 ({ev_url_2}):\n{text[:3000]}")
                 except Exception as e:
-                    evidence_texts.append("Evidence from " + ev_url_2 + " could not be loaded: " + str(e))
+                    evidence_texts.append(f"Evidence 2 ({ev_url_2}) error: {str(e)}")
 
             combined_evidence = "\n\n".join(evidence_texts)
 
-            prompt = (
-                "You are an impartial dispute resolution AI for a freelancer platform.\n\n"
-                "Milestone Description: " + ms_description + "\n\n"
-                "Evidence Submitted by Freelancer:\n" + combined_evidence + "\n\n"
-                "Based on the evidence, determine the outcome of the dispute for this milestone.\n"
-                "You must return ONLY a raw JSON object with no markdown wrappers or backticks.\n\n"
-                "Schema:\n"
-                '{"verdict": "RELEASE" or "REFUND" or "PARTIAL", '
-                '"percentage": int 0-100, '
-                '"confidence": int 0-100, '
-                '"reason": "string explaining your reasoning"}'
-            )
+            prompt = f"""
+SYSTEM: You are an impartial dispute resolution AI for a freelancer platform.
+Milestone Description: {ms_description}
 
-            raw = gl.nondet.exec_prompt(prompt, response_format="json")
-            parsed = _safe_parse(raw)
-            if parsed is None:
-                # Trả về object đặc biệt để validator reject
-                return {
-                    "verdict": "INVALID",
-                    "percentage": 0,
-                    "confidence": 0,
-                    "reason": "parse_failed"
-                }
-            return parsed
+Evidence Submitted:
+{combined_evidence}
+
+Rules:
+- RELEASE (percentage=100): Evidence fully satisfies the milestone requirements.
+- REFUND (percentage=0): Evidence is invalid, empty, irrelevant, or fails completely.
+- PARTIAL (percentage=1-99): Evidence partially satisfies requirements.
+- If confidence < 60 or evidence is unverifiable, set verdict to ESCALATE.
+
+OUTPUT ONLY RAW JSON:
+{{
+  "verdict": "RELEASE" | "REFUND" | "PARTIAL" | "ESCALATE",
+  "percentage": 0-100,
+  "confidence": 0-100,
+  "reason": "explanation string"
+}}
+"""
+            try:
+                raw = gl.nondet.exec_prompt(prompt, response_format="json")
+                parsed = _safe_parse(raw)
+                if parsed is None:
+                    return {"verdict": "ESCALATE", "percentage": 0, "confidence": 0, "reason": "parse_failed"}
+                return parsed
+            except Exception as e:
+                return {"verdict": "ESCALATE", "percentage": 0, "confidence": 0, "reason": f"LLM error: {str(e)}"}
 
         def validator_fn(leader_res) -> bool:
             if not isinstance(leader_res, gl.vm.Return):
                 return False
 
-            leader = _safe_parse(leader_res.calldata)
-            if leader is None or leader.get("verdict") == "INVALID":
+            leader_data = leader_res.calldata if hasattr(leader_res, "calldata") else leader_res
+            leader = _safe_parse(leader_data)
+            if leader is None:
                 return False
 
             mine = _safe_parse(leader_fn())
-            if mine is None or mine.get("verdict") == "INVALID":
+            if mine is None:
                 return False
 
-            # === BIND MỌI FIELD ẢNH HƯỞNG ĐẾN PAYOUT ===
-            # verdict + percentage + confidence đều được so khớp chặt
+            # Semantic agreement on verified payout fields
             return (
                 mine["verdict"] == leader["verdict"]
                 and mine["percentage"] == leader["percentage"]
-                and mine["confidence"] == leader["confidence"]
             )
 
         result_raw = gl.vm.run_nondet(leader_fn, validator_fn)
         result = _safe_parse(result_raw)
 
-        if result is None or result.get("verdict") == "INVALID":
-            raise UserError("AI returned invalid or unparseable result")
+        if result is None:
+            result = {"verdict": "ESCALATE", "percentage": 0, "confidence": 0, "reason": "adjudication_failed"}
 
         verdict = result["verdict"]
-        confidence = result["confidence"]
         percentage = result["percentage"]
+        confidence = result["confidence"]
         reason = result["reason"]
 
-        if confidence < 60:
-            raise UserError("AI confidence too low to adjudicate autonomously")
-
         ms_amount = milestone.amount
-        freelancer_addr = job.freelancer
-        client_addr = job.client
+        freelancer_addr = Address(job.freelancer)
+        client_addr = Address(job.client)
 
-        # Protocol fee: 2%
+        if verdict == "ESCALATE":
+            milestone.state = "ESCALATED"
+            milestone.verdict = "ESCALATE"
+            milestone.reason = reason
+            self.milestones[m_key] = milestone
+            return
+
         fee = (ms_amount * bigint(2)) // bigint(100)
 
         if verdict == "RELEASE":
             payout = ms_amount - fee
             if fee > bigint(0):
-                gl.get_contract_at(Address(self.treasury_address)).emit_transfer(value=fee)
+                gl.get_contract_at(self._get_treasury_addr()).emit_transfer(value=fee)
             if payout > bigint(0):
                 gl.get_contract_at(freelancer_addr).emit_transfer(value=payout)
 
         elif verdict == "REFUND":
-            gl.get_contract_at(client_addr).emit_transfer(value=ms_amount)
+            if ms_amount > bigint(0):
+                gl.get_contract_at(client_addr).emit_transfer(value=ms_amount)
 
         elif verdict == "PARTIAL":
             freelancer_share = (ms_amount * bigint(percentage)) // bigint(100)
@@ -300,7 +343,7 @@ class Contract(gl.Contract):
             f_fee = (freelancer_share * bigint(2)) // bigint(100)
             f_payout = freelancer_share - f_fee
             if f_fee > bigint(0):
-                gl.get_contract_at(Address(self.treasury_address)).emit_transfer(value=f_fee)
+                gl.get_contract_at(self._get_treasury_addr()).emit_transfer(value=f_fee)
             if f_payout > bigint(0):
                 gl.get_contract_at(freelancer_addr).emit_transfer(value=f_payout)
             if client_share > bigint(0):
@@ -318,9 +361,9 @@ class Contract(gl.Contract):
         job = self.jobs[job_id]
         return json.dumps({
             "id": str(job.id),
-            "client": str(job.client),
-            "freelancer": str(job.freelancer),
-            "milestones_count": str(job.milestones_count)
+            "client": job.client,
+            "freelancer": job.freelancer,
+            "milestones_count": str(job.milestones_count),
         })
 
     @gl.public.view
@@ -339,5 +382,5 @@ class Contract(gl.Contract):
             "evidence_count": str(m.evidence_count),
             "state": m.state,
             "verdict": m.verdict,
-            "reason": m.reason
+            "reason": m.reason,
         })
