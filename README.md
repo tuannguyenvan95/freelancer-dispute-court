@@ -1,70 +1,81 @@
 # Freelancer Dispute Court
 
-**Freelancer Dispute Court** is an intelligent escrow system designed to securely hold funds for freelance jobs and resolve disputes using autonomous AI arbitration on **GenLayer**.
+**Freelancer Dispute Court** is a standalone Intelligent Contract primitive on **GenLayer** that provides decentralized escrow and autonomous AI dispute arbitration for freelance contracts, bounties, and service agreements.
 
 ## The Problem & The GenLayer Solution
 
-Traditional escrow smart contracts suffer from a critical flaw: if the client and freelancer disagree, funds are locked indefinitely, or they rely on a centralized, trusted third-party human arbitrator (which is slow, expensive, and biased).
+Traditional escrow smart contracts suffer from a fundamental flaw: if a client and freelancer disagree on deliverables, funds are locked indefinitely, or they must rely on a centralized, trusted third-party human arbitrator (slow, expensive, and biased).
 
-**Why this project dies without GenLayer:**
-Without GenLayer, this project is just a dumb escrow that permanently locks funds when clients and freelancers disagree, because blockchains cannot read off-chain evidence or make subjective judgments. 
+**Why this primitive requires GenLayer:**
+Blockchains traditionally cannot read off-chain evidence or evaluate subjective deliverables (like design files, PRs, codebases, or deployed websites). Without GenLayer, escrow contracts are unable to autonomously resolve real-world disputes.
 
-With GenLayer's non-deterministic Intelligent Contracts, the contract itself browses the web (e.g., GitHub PRs, live demo sites) and acts as an impartial, automated judge. By leveraging `gl.nondet.web.render` and `gl.nondet.exec_prompt`, the contract securely and transparently adjudicates disputes on-chain, unlocking a completely decentralized freelance economy.
+With GenLayer's non-deterministic Intelligent Contracts:
+1. The contract fetches live web evidence directly using `gl.nondet.web.render`.
+2. The contract prompts an LLM via `gl.nondet.exec_prompt` to adjudicate the milestone against submitted evidence.
+3. GenLayer nodes execute non-deterministic verification and reach decentralized consensus on the dispute verdict.
 
-## Features
+## Public API & Lifecycle
 
-- **Decentralized Escrow:** Securely locks GEN tokens until the job is completed or disputed.
-- **Multi-Source Web Evidence:** Freelancers can submit multiple URLs (e.g., GitHub, Live Demo). The Intelligent Contract reads them directly from the web.
-- **Autonomous AI Arbitration:** If disputed, the contract's `adjudicate` function cross-checks the job description against the web evidence and outputs a verdict (`RELEASE`, `REFUND`, or `PARTIAL` with a percentage split).
-- **Robust Consensus:** The validator function strictly compares the mathematical/categorical outcomes (the verdict and percentage), explicitly ignoring the subjective language of the AI's "reasoning". This ensures consensus is reliably reached on the studionet.
-- **Premium User Experience:** A beautiful, responsive web app built with React, Vite, and GenLayer JS.
+- **`create_job(freelancer_addr: str)`**: Initializes a new job counter and records client and freelancer addresses.
+- **`add_milestone(job_id: str, description: str)` [Payable]**: Adds a funded milestone in state `OPEN`, locking deposit in escrow.
+- **`submit_evidence(job_id: str, milestone_id: str, url: str)`**: Freelancer submits up to 2 web evidence URLs.
+- **`open_dispute(job_id: str, milestone_id: str)`**: Either party transitions milestone from `OPEN` to `DISPUTED`.
+- **`adjudicate(job_id: str, milestone_id: str)`**: Triggers AI evaluation of submitted evidence against description.
+  - `RELEASE`: Transfers milestone amount (minus 2% protocol fee) to freelancer. State becomes `CLOSED`.
+  - `REFUND`: Refunds 100% of milestone deposit back to client. State becomes `CLOSED`.
+  - `PARTIAL`: Splits funds proportionally based on `percentage` (e.g. 60% freelancer / 40% client). State becomes `CLOSED`.
+  - `ESCALATE`: If AI confidence < 60% or evidence is unverifiable, escrow remains 100% preserved in contract. State becomes `ESCALATED`.
+- **`get_job(job_id: str) -> str`**: Returns JSON serialized job details.
+- **`get_milestone(job_id: str, milestone_id: str) -> str`**: Returns JSON serialized milestone details.
 
-## Architecture
+## How Consensus & Validator Work (Agreement on MEANING)
 
-1. **Client** creates a job and deposits GEN into the escrow contract.
-2. **Freelancer** completes the work and submits up to two evidence URLs.
-3. Either party can trigger **Open Dispute** if there is a disagreement.
-4. Anyone can call **Adjudicate**. The contract fetches the URLs, prompts the LLM, and reaches a non-deterministic consensus on the verdict, automatically transferring the funds based on the result.
+GenLayer validators run non-deterministic operations (`leader_fn`) and verify proposals using `validator_fn(leader_res)`.
 
-## Example Usage
-
-**Setup Mocks & Run (Expected Verdict: REFUND):**
-```python
-contract.connect(freelancer).submit_evidence(
-    args=["1", "1", "https://freelancer-evidence.com/deliverable"]
-).transact()
-
-# Mocking the AI adjudication: The evidence does not meet the milestone requirements.
-client.provider.make_request(
-    method="sim_installMocks",
-    params={
-        "llm_mocks": {
-            ".*": json.dumps({
-                "verdict": "REFUND",
-                "percentage": 0,
-                "confidence": 95,
-                "reason": "The submitted evidence is entirely unrelated to the requested milestone."
-            })
-        },
-        "web_mocks": {
-            ".*": {"status": 200, "body": "Placeholder content"}
-        }
-    }
-)
-
-# Adjudicate milestone #1 for job #1
-result = contract.connect(client_addr).adjudicate(args=["1", "1"]).transact()
-
-# Expected state
-milestone = contract.get_milestone(args=["1", "1"]).call()
-assert milestone.verdict == "REFUND"
-assert milestone.state == "CLOSED"
-```
+A naive check would verify string equality of LLM outputs, which inevitably fails due to non-deterministic wording. The Freelancer Dispute Court implements **semantic agreement on MEANING**:
+- The validator parses and validates the structured output via `_safe_parse`.
+- If confidence < 60%, the verdict is automatically mapped to `ESCALATE` with `percentage = 0`.
+- The validator strictly compares:
+  1. `mine["verdict"] == leader["verdict"]`
+  2. `mine["percentage"] == leader["percentage"]`
+- Subjective natural language explanations (`reason`) are excluded from consensus comparison, while **all payout-affecting fields are strictly bound**.
+- Any divergence in payout intent or low-confidence escalation causes validators to reject the proposal, preventing erroneous state transitions.
 
 ## Deployment
 
-This intelligent contract has been deployed on GenLayer.
-- **CONTRACT_ADDRESS:** `0x70fa94e8520D3F95fcc82356b2031e49f3eA1201`
+- **CONTRACT_ADDRESS:** `0x692B254E7B7904e34D2C0840240182157972041C`
 - **NETWORK:** `studionet`
+- **Studio URL:** https://studio.genlayer.com/contracts/0x692B254E7B7904e34D2C0840240182157972041C
+- **Explorer URL:** https://explorer-studio.genlayer.com/address/0x692B254E7B7904e34D2C0840240182157972041C
 
-See [scripts/deploy.md](scripts/deploy.md) for step-by-step instructions on how to deploy this intelligent contract on GenLayer Studio.
+## Illustrative Worked Example
+
+### 1. Job Creation & Funded Milestone
+```python
+# Client creates job with Freelancer 0xFreelancer...
+contract.create_job(freelancer_addr="0xFreelancer_222")
+
+# Client funds Milestone 1 with 1,000 GEN tokens
+contract.add_milestone(job_id="1", description="Implement Responsive Navbar & Auth Flow", value=1000)
+```
+
+### 2. Evidence Submission & Dispute
+```python
+# Freelancer submits GitHub PR URL as evidence
+contract.submit_evidence(job_id="1", milestone_id="1", url="https://github.com/example/repo/pull/12")
+
+# Dispute opened due to disagreement on responsiveness
+contract.open_dispute(job_id="1", milestone_id="1")
+```
+
+### 3. AI Adjudication & Payout
+```python
+# Anyone calls adjudicate
+contract.adjudicate(job_id="1", milestone_id="1")
+```
+
+**Expected Outcome (Illustrative):**
+- **AI Verdict:** `RELEASE` (Confidence: 95%, Percentage: 100%)
+- **Treasury Payout:** 20 GEN (2% protocol fee)
+- **Freelancer Payout:** 980 GEN
+- **Milestone Final State:** `CLOSED`
