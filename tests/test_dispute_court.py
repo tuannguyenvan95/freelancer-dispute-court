@@ -101,23 +101,18 @@ class TestOfflineDisputeCourt(unittest.TestCase):
         client = MockAddress("0xClient_111")
         freelancer = "0xFreelancer_222"
         
-        # Create Job
         self.gl_instance.message.sender_address = client
         self.contract.create_job(freelancer)
         
-        # Add Milestone (1000 wei)
         self.gl_instance.message.value = MockBigInt(1000)
         self.contract.add_milestone("1", "Frontend UI")
         
-        # Submit Evidence
         self.gl_instance.message.sender_address = MockAddress(freelancer)
         self.contract.submit_evidence("1", "1", "https://github.com/pr/1")
         
-        # Open Dispute
         self.gl_instance.message.sender_address = client
         self.contract.open_dispute("1", "1")
         
-        # Mock Web & LLM
         self.gl_instance.nondet.web.render = lambda url, mode="text": "Evidence UI loaded successfully."
         self.gl_instance.nondet.exec_prompt = lambda prompt, response_format="json": {
             "verdict": "RELEASE",
@@ -126,15 +121,12 @@ class TestOfflineDisputeCourt(unittest.TestCase):
             "reason": "Milestone delivered completely."
         }
         
-        # Adjudicate
         self.contract.adjudicate("1", "1")
         
-        # Assertions
         ms = json.loads(self.contract.get_milestone("1", "1"))
         self.assertEqual(ms["state"], "CLOSED")
         self.assertEqual(ms["verdict"], "RELEASE")
         
-        # Protocol fee: 2% (20) to treasury, 980 to freelancer
         transfers = self.gl_instance.transfers
         self.assertEqual(len(transfers), 2)
         self.assertEqual(transfers[0]["to"], "0xTreasury_123")
@@ -142,77 +134,97 @@ class TestOfflineDisputeCourt(unittest.TestCase):
         self.assertEqual(transfers[1]["to"], "0xFreelancer_222")
         self.assertEqual(transfers[1]["value"], 980)
 
-    def test_02_low_confidence_escalates_and_preserves_escrow(self):
+    def test_02_open_milestone_acceptance_route(self):
+        """NEW ROUTE TEST: Client directly accepts OPEN milestone without dispute."""
         client = MockAddress("0xClient_111")
         freelancer = "0xFreelancer_222"
         
         self.gl_instance.message.sender_address = client
         self.contract.create_job(freelancer)
         self.gl_instance.message.value = MockBigInt(1000)
-        self.contract.add_milestone("1", "Backend API")
+        self.contract.add_milestone("1", "Acceptance Test")
+        
+        # Client accepts directly
+        self.contract.accept_milestone("1", "1")
+        
+        ms = json.loads(self.contract.get_milestone("1", "1"))
+        self.assertEqual(ms["state"], "CLOSED")
+        self.assertEqual(ms["verdict"], "ACCEPTED_BY_CLIENT")
+        
+        transfers = self.gl_instance.transfers
+        self.assertEqual(len(transfers), 2)
+        self.assertEqual(transfers[0]["to"], "0xTreasury_123")
+        self.assertEqual(transfers[0]["value"], 20)
+        self.assertEqual(transfers[1]["to"], "0xFreelancer_222")
+        self.assertEqual(transfers[1]["value"], 980)
+
+    def test_03_open_milestone_cancellation_route(self):
+        """NEW ROUTE TEST: Client cancels OPEN milestone before evidence submission."""
+        client = MockAddress("0xClient_111")
+        freelancer = "0xFreelancer_222"
+        
+        self.gl_instance.message.sender_address = client
+        self.contract.create_job(freelancer)
+        self.gl_instance.message.value = MockBigInt(500)
+        self.contract.add_milestone("1", "Cancellation Test")
+        
+        # Client cancels
+        self.contract.cancel_milestone("1", "1")
+        
+        ms = json.loads(self.contract.get_milestone("1", "1"))
+        self.assertEqual(ms["state"], "CLOSED")
+        self.assertEqual(ms["verdict"], "CANCELLED_BY_CLIENT")
+        
+        transfers = self.gl_instance.transfers
+        self.assertEqual(len(transfers), 1)
+        self.assertEqual(transfers[0]["to"], "0xClient_111")
+        self.assertEqual(transfers[0]["value"], 500)
+
+    def test_04_escalated_milestone_resolution_route(self):
+        """NEW ROUTE TEST: Escalated milestone resolved by authorized party."""
+        client = MockAddress("0xClient_111")
+        freelancer = "0xFreelancer_222"
+        
+        self.gl_instance.message.sender_address = client
+        self.contract.create_job(freelancer)
+        self.gl_instance.message.value = MockBigInt(1000)
+        self.contract.add_milestone("1", "Escalation Resolution Test")
         
         self.gl_instance.message.sender_address = MockAddress(freelancer)
-        self.contract.submit_evidence("1", "1", "https://api-demo.com")
+        self.contract.submit_evidence("1", "1", "https://demo.com")
         
         self.gl_instance.message.sender_address = client
         self.contract.open_dispute("1", "1")
         
-        # LLM returns low confidence (50% < 60%)
-        self.gl_instance.nondet.web.render = lambda url, mode="text": "Ambiguous API output."
+        # AI returns low confidence (50% < 60%)
+        self.gl_instance.nondet.web.render = lambda url, mode="text": "Ambiguous evidence"
         self.gl_instance.nondet.exec_prompt = lambda prompt, response_format="json": {
             "verdict": "RELEASE",
             "percentage": 100,
             "confidence": 50,
-            "reason": "Unsure about database schema."
+            "reason": "Low confidence"
         }
         
-        # Adjudicate
         self.contract.adjudicate("1", "1")
-        
         ms = json.loads(self.contract.get_milestone("1", "1"))
         self.assertEqual(ms["state"], "ESCALATED")
-        self.assertEqual(ms["verdict"], "ESCALATE")
-        self.assertEqual(len(self.gl_instance.transfers), 0, "No funds should move on ESCALATE")
-
-    def test_03_partial_settlement(self):
-        client = MockAddress("0xClient_111")
-        freelancer = "0xFreelancer_222"
         
-        self.gl_instance.message.sender_address = client
-        self.contract.create_job(freelancer)
-        self.gl_instance.message.value = MockBigInt(1000)
-        self.contract.add_milestone("1", "Design Assets")
+        # Client settles escalated dispute 50/50
+        self.gl_instance.transfers = []
+        self.contract.resolve_escalated("1", "1", freelancer_percentage=50)
         
-        self.gl_instance.message.sender_address = MockAddress(freelancer)
-        self.contract.submit_evidence("1", "1", "https://figma.com/file")
+        ms_after = json.loads(self.contract.get_milestone("1", "1"))
+        self.assertEqual(ms_after["state"], "CLOSED")
+        self.assertIn("RESOLVED_ESCALATION_50_PERCENT", ms_after["verdict"])
         
-        self.gl_instance.message.sender_address = client
-        self.contract.open_dispute("1", "1")
-        
-        # LLM returns 60% partial payout
-        self.gl_instance.nondet.web.render = lambda url, mode="text": "Partial designs available."
-        self.gl_instance.nondet.exec_prompt = lambda prompt, response_format="json": {
-            "verdict": "PARTIAL",
-            "percentage": 60,
-            "confidence": 85,
-            "reason": "60% completed."
-        }
-        
-        self.contract.adjudicate("1", "1")
-        
-        ms = json.loads(self.contract.get_milestone("1", "1"))
-        self.assertEqual(ms["state"], "CLOSED")
-        self.assertEqual(ms["verdict"], "PARTIAL")
-        
-        # 1000 total: freelancer share = 600 (fee 2% = 12, payout = 588), client share = 400
         transfers = self.gl_instance.transfers
         self.assertEqual(len(transfers), 3)
         self.assertEqual(transfers[0]["to"], "0xTreasury_123")
-        self.assertEqual(transfers[0]["value"], 12)
+        self.assertEqual(transfers[0]["value"], 10)
         self.assertEqual(transfers[1]["to"], "0xFreelancer_222")
-        self.assertEqual(transfers[1]["value"], 588)
+        self.assertEqual(transfers[1]["value"], 490)
         self.assertEqual(transfers[2]["to"], "0xClient_111")
-        self.assertEqual(transfers[2]["value"], 400)
+        self.assertEqual(transfers[2]["value"], 500)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -100,6 +100,71 @@ class Contract(gl.Contract):
         self.jobs[job_id] = job
 
     @gl.public.write
+    def accept_milestone(self, job_id: str, milestone_id: str) -> None:
+        """Client accepts completed milestone work directly without dispute, releasing funds to freelancer."""
+        if job_id not in self.jobs:
+            raise UserError("Job not found")
+
+        job = self.jobs[job_id]
+        if self._addr_str(gl.message.sender_address) != job.client:
+            raise UserError("Only client can accept milestone")
+
+        m_key = str(job_id) + "_" + str(milestone_id)
+        if m_key not in self.milestones:
+            raise UserError("Milestone not found")
+
+        milestone = self.milestones[m_key]
+        if milestone.state != "OPEN":
+            raise UserError("Milestone is not open for acceptance")
+
+        ms_amount = milestone.amount
+        freelancer_addr = Address(job.freelancer)
+
+        fee = (ms_amount * bigint(2)) // bigint(100)
+        payout = ms_amount - fee
+
+        if fee > bigint(0):
+            gl.get_contract_at(self._get_treasury_addr()).emit_transfer(value=fee)
+        if payout > bigint(0):
+            gl.get_contract_at(freelancer_addr).emit_transfer(value=payout)
+
+        milestone.state = "CLOSED"
+        milestone.verdict = "ACCEPTED_BY_CLIENT"
+        milestone.reason = "Client directly accepted deliverable work."
+        self.milestones[m_key] = milestone
+
+    @gl.public.write
+    def cancel_milestone(self, job_id: str, milestone_id: str) -> None:
+        """Client cancels an open milestone if no evidence has been submitted, refunding deposit to client."""
+        if job_id not in self.jobs:
+            raise UserError("Job not found")
+
+        job = self.jobs[job_id]
+        if self._addr_str(gl.message.sender_address) != job.client:
+            raise UserError("Only client can cancel milestone")
+
+        m_key = str(job_id) + "_" + str(milestone_id)
+        if m_key not in self.milestones:
+            raise UserError("Milestone not found")
+
+        milestone = self.milestones[m_key]
+        if milestone.state != "OPEN":
+            raise UserError("Milestone is not open for cancellation")
+        if milestone.evidence_count > bigint(0):
+            raise UserError("Cannot cancel milestone after freelancer submitted evidence; use open_dispute instead")
+
+        ms_amount = milestone.amount
+        client_addr = Address(job.client)
+
+        if ms_amount > bigint(0):
+            gl.get_contract_at(client_addr).emit_transfer(value=ms_amount)
+
+        milestone.state = "CLOSED"
+        milestone.verdict = "CANCELLED_BY_CLIENT"
+        milestone.reason = "Client cancelled milestone before evidence submission."
+        self.milestones[m_key] = milestone
+
+    @gl.public.write
     def submit_evidence(self, job_id: str, milestone_id: str, url: str) -> None:
         if job_id not in self.jobs:
             raise UserError("Job not found")
@@ -147,6 +212,61 @@ class Contract(gl.Contract):
             raise UserError("Cannot dispute before any evidence is submitted")
 
         milestone.state = "DISPUTED"
+        self.milestones[m_key] = milestone
+
+    @gl.public.write
+    def resolve_escalated(self, job_id: str, milestone_id: str, freelancer_percentage: int) -> None:
+        """Authorized completion path for ESCALATED milestones by client agreement or treasury authority."""
+        if job_id not in self.jobs:
+            raise UserError("Job not found")
+
+        job = self.jobs[job_id]
+        sender = self._addr_str(gl.message.sender_address)
+        treasury_addr_str = self.treasury_address.lower() if self.treasury_address else ""
+        
+        if sender != job.client and sender.lower() != treasury_addr_str:
+            raise UserError("Only client or treasury authority can resolve escalated milestone")
+
+        if not (0 <= freelancer_percentage <= 100):
+            raise UserError("Percentage must be between 0 and 100")
+
+        m_key = str(job_id) + "_" + str(milestone_id)
+        if m_key not in self.milestones:
+            raise UserError("Milestone not found")
+
+        milestone = self.milestones[m_key]
+        if milestone.state != "ESCALATED":
+            raise UserError("Milestone is not in ESCALATED state")
+
+        ms_amount = milestone.amount
+        freelancer_addr = Address(job.freelancer)
+        client_addr = Address(job.client)
+
+        if freelancer_percentage == 100:
+            fee = (ms_amount * bigint(2)) // bigint(100)
+            payout = ms_amount - fee
+            if fee > bigint(0):
+                gl.get_contract_at(self._get_treasury_addr()).emit_transfer(value=fee)
+            if payout > bigint(0):
+                gl.get_contract_at(freelancer_addr).emit_transfer(value=payout)
+        elif freelancer_percentage == 0:
+            if ms_amount > bigint(0):
+                gl.get_contract_at(client_addr).emit_transfer(value=ms_amount)
+        else:
+            freelancer_share = (ms_amount * bigint(freelancer_percentage)) // bigint(100)
+            client_share = ms_amount - freelancer_share
+            f_fee = (freelancer_share * bigint(2)) // bigint(100)
+            f_payout = freelancer_share - f_fee
+            if f_fee > bigint(0):
+                gl.get_contract_at(self._get_treasury_addr()).emit_transfer(value=f_fee)
+            if f_payout > bigint(0):
+                gl.get_contract_at(freelancer_addr).emit_transfer(value=f_payout)
+            if client_share > bigint(0):
+                gl.get_contract_at(client_addr).emit_transfer(value=client_share)
+
+        milestone.state = "CLOSED"
+        milestone.verdict = f"RESOLVED_ESCALATION_{freelancer_percentage}_PERCENT"
+        milestone.reason = f"Escalated dispute settled by authorized party ({sender}) with {freelancer_percentage}% freelancer payout."
         self.milestones[m_key] = milestone
 
     @gl.public.write
