@@ -61,10 +61,10 @@ A naive check would verify string equality of LLM outputs, which inevitably fail
 
 ## Deployment
 
-- **CONTRACT_ADDRESS:** `0x692B254E7B7904e34D2C0840240182157972041C`
+- **CONTRACT_ADDRESS:** `0xaa1E4A195005eE07206fd9C5d93401Ec8A5c7964`
 - **NETWORK:** `studionet`
-- **Studio URL:** https://studio.genlayer.com/contracts/0x692B254E7B7904e34D2C0840240182157972041C
-- **Explorer URL:** https://explorer-studio.genlayer.com/address/0x692B254E7B7904e34D2C0840240182157972041C
+- **Studio URL:** https://studio.genlayer.com/contracts/0xaa1E4A195005eE07206fd9C5d93401Ec8A5c7964
+- **Explorer URL:** https://explorer-studio.genlayer.com/address/0xaa1E4A195005eE07206fd9C5d93401Ec8A5c7964
 
 ## Illustrative Worked Example
 
